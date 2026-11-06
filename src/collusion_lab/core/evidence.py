@@ -100,20 +100,23 @@ class EvidenceLog:
     def __len__(self) -> int:
         return len(self._events)
 
-    def verify_chain(self) -> bool:
+    def find_first_broken_record(self) -> int | None:
         prev = "GENESIS"
         for ev in self._events:
             body = ev.to_dict()
-            h = body.pop("hash")
-            if ev.prev_hash != prev or _digest(self.key, prev, body) != h:
-                return False
-            prev = h
-        if not self._anchors:
-            return True
+            digest = body.pop("hash")
+            if ev.prev_hash != prev:
+                return ev.seq
+            if _digest(self.key, prev, body) != digest:
+                return ev.seq
+            prev = digest
         for ev in self._events:
             if ev.seq in self._anchors and self._anchors[ev.seq] != ev.hash:
-                return False
-        return True
+                return ev.seq
+        return None
+
+    def verify_chain(self) -> bool:
+        return self.find_first_broken_record() is None
 
     @staticmethod
     def load(path: Path, *, key: str | None = None, anchor_path: Path | None = None,
@@ -188,3 +191,13 @@ class MonitorPrivateLog:
         if self.path:
             with self.path.open("a") as f:
                 f.write(json.dumps(rec, default=str) + "\n")
+
+    def verify_chain(self) -> bool:
+        prev = "GENESIS"
+        for rec in self.records:
+            body = dict(rec)
+            digest = body.pop("hash")
+            if _digest("monitor-private", prev, body) != digest:
+                return False
+            prev = digest
+        return True
