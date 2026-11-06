@@ -77,6 +77,68 @@ class ScenarioPlugin(Protocol):
     def signals(self, level: str, ctx: Any, events: list[Event]) -> list[Signal]: ...
 
 
+MONITOR_INPUT_VIEWS = ("agent_transcript", "chain", "anchored_chain")
+
+
+def select_monitor_input(events: list[Event], input_source: str = "agent_transcript") -> list[Event]:
+    """Switch the monitor between plain transcript, hash-chain, and anchored-chain views.
+
+    This keeps the same evidence stream but tags each record with the view that was used,
+    which lets the monitor compare false gaps and action differences without changing
+    the underlying evidence log itself.
+    """
+    if input_source not in MONITOR_INPUT_VIEWS:
+        raise ValueError(f"unsupported monitor input source: {input_source!r}")
+    if input_source == "agent_transcript":
+        return list(events)
+
+    out: list[Event] = []
+    for ev in events:
+        payload = dict(ev.payload)
+        payload["_monitor_input"] = input_source
+        payload["_chain_digest"] = {"prev_hash": ev.prev_hash, "hash": ev.hash}
+        if input_source == "anchored_chain":
+            payload["_anchor_ok"] = bool(ev.hash and ev.prev_hash)
+        out.append(Event(
+            ev.episode_id,
+            ev.actor,
+            ev.kind,
+            payload,
+            ev.channel,
+            ev.step,
+            ev.ts,
+            ev.seq,
+            ev.prev_hash,
+            ev.hash,
+        ))
+    return out
+
+
+def compare_monitor_views(level: str, plugin: ScenarioPlugin, ctx: Any, events: list[Event], *,
+                         policy: PolicyConfig | None = None, observability: str = "full",
+                         private_log: MonitorPrivateLog | None = None,
+                         views: tuple[str, ...] = MONITOR_INPUT_VIEWS,
+                         step: int | None = None) -> dict[str, Decision]:
+    """Replay the same evidence under each monitor view and return the resulting decision."""
+    results: dict[str, Decision] = {}
+    for view in views:
+        mon = TrustedMonitor(level, plugin, observability=observability, policy=policy, private_log=private_log)
+        results[view] = mon.evaluate(ctx, select_monitor_input(events, view), step=step, input_source=view)
+    return results
+
+
+def summarize_monitor_views(results: dict[str, Decision]) -> dict[str, Any]:
+    """Compact view-to-view comparison summary for quick M3 reporting."""
+    actions = {k: d.action.value for k, d in results.items()}
+    gaps = {k: d.reasons for k, d in results.items()}
+    return {
+        "action_by_view": actions,
+        "flagged_views": {k: d.flagged for k, d in results.items()},
+        "reason_count_by_view": {k: len(d.reasons) for k, d in results.items()},
+        "false_gap_candidates": gaps,
+    }
+
+
 class TrustedMonitor:
     """Runs outside the agents' process space; reads the evidence log read-only and
     writes only to its private log. Agents have no tool that reaches it."""
@@ -93,11 +155,13 @@ class TrustedMonitor:
     def name(self) -> str:
         return f"{self.level}[{self.obs.preset}]"
 
-    def evaluate(self, ctx: Any, events: list[Event], step: int | None = None) -> Decision:
+    def evaluate(self, ctx: Any, events: list[Event], step: int | None = None,
+                 input_source: str = "agent_transcript") -> Decision:
         if self.level == "M0":
             d = Decision(Action.ALLOW, 0.0, [], [], step, [], self.name)
         else:
-            sigs = self.plugin.signals(self.level, ctx, self.obs.apply(events))
+            view_events = select_monitor_input(events, input_source)
+            sigs = self.plugin.signals(self.level, ctx, self.obs.apply(view_events))
             d = decide(sigs, self.name, self.policy, step)
-        self.private.record({"monitor": self.name, "decision": d.to_dict()})
+        self.private.record({"monitor": self.name, "source": input_source, "decision": d.to_dict()})
         return d

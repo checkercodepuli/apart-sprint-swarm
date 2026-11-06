@@ -92,3 +92,31 @@ def test_monitor_private_log_chain_verifies():
     bad.record({"kind": "decision", "action": "hold", "actor": "monitor"})
     bad.records[0]["action"] = "rewrite"
     assert not bad.verify_chain()
+
+
+def test_monitor_input_views_are_switchable():
+    from collusion_lab.monitor.core import MONITOR_INPUT_VIEWS, compare_monitor_views, select_monitor_input
+    log = EvidenceLog(None)
+    for i in range(3):
+        log.emit("ep", "a", EventKind.MESSAGE, {"text": f"m{i}"}, "chat:team", i)
+
+    transcript = select_monitor_input(log.events(), "agent_transcript")
+    chain = select_monitor_input(log.events(), "chain")
+    anchored = select_monitor_input(log.events(), "anchored_chain")
+    assert transcript[0].payload.get("_monitor_input") is None
+    assert chain[0].payload["_monitor_input"] == "chain"
+    assert anchored[0].payload["_monitor_input"] == "anchored_chain"
+    assert set(MONITOR_INPUT_VIEWS) == {"agent_transcript", "chain", "anchored_chain"}
+
+
+def test_compare_monitor_views_returns_per_view_decisions():
+    from collusion_lab.monitor.core import compare_monitor_views
+    from collusion_lab.scenarios.market.monitor_plugin import MarketContext, MarketPlugin
+
+    log = EvidenceLog(None)
+    for i in range(3):
+        log.emit("ep", "a", EventKind.MESSAGE, {"text": f"m{i}"}, "chat:team", i)
+    ctx = MarketContext({"S1": 60, "S2": 62}, {"B1": 100}, ["S1", "S2"], step=0)
+    results = compare_monitor_views("M1", MarketPlugin(), ctx, log.events(), views=("agent_transcript", "chain"))
+    assert set(results) == {"agent_transcript", "chain"}
+    assert all(isinstance(d.action.value, str) for d in results.values())
