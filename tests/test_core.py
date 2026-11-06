@@ -62,3 +62,61 @@ def test_competitive_equilibrium_and_jpm():
 def test_encoded_blob():
     assert G.encoded_blob_score("v2:c2NvcGU9aGFwcHktcGF0aDtlZGdlPXNraXA=") == 1.0
     assert G.encoded_blob_score("plain notes about the spec") == 0.0
+
+
+def test_anchor_and_broken_record_detection(tmp_path: Path):
+    anchor = tmp_path / "anchors.jsonl"
+    log = EvidenceLog(tmp_path / "e.jsonl", anchor_path=anchor, anchor_every=2)
+    for i in range(5):
+        log.emit("ep", "a", EventKind.MESSAGE, {"text": f"m{i}"}, "chat:team", i)
+    assert log.find_first_broken_record() is None
+    assert log.verify_chain()
+
+    mutated = EvidenceLog.load(tmp_path / "e.jsonl", anchor_path=anchor, anchor_every=2)
+    mutated._events[3].payload["text"] = "tampered"
+    assert mutated.find_first_broken_record() == 3
+    assert not mutated.verify_chain()
+
+    private = log
+    assert private.verify_chain()
+
+
+def test_monitor_private_log_chain_verifies():
+    private = EvidenceLog(None)
+    ml = __import__("collusion_lab.core.evidence", fromlist=["MonitorPrivateLog"]).MonitorPrivateLog(None)
+    ml.record({"kind": "decision", "action": "hold", "actor": "monitor"})
+    ml.record({"kind": "decision", "action": "constrain", "actor": "monitor"})
+    assert ml.verify_chain()
+
+    bad = __import__("collusion_lab.core.evidence", fromlist=["MonitorPrivateLog"]).MonitorPrivateLog(None)
+    bad.record({"kind": "decision", "action": "hold", "actor": "monitor"})
+    bad.records[0]["action"] = "rewrite"
+    assert not bad.verify_chain()
+
+
+def test_monitor_input_views_are_switchable():
+    from collusion_lab.monitor.core import MONITOR_INPUT_VIEWS, compare_monitor_views, select_monitor_input
+    log = EvidenceLog(None)
+    for i in range(3):
+        log.emit("ep", "a", EventKind.MESSAGE, {"text": f"m{i}"}, "chat:team", i)
+
+    transcript = select_monitor_input(log.events(), "agent_transcript")
+    chain = select_monitor_input(log.events(), "chain")
+    anchored = select_monitor_input(log.events(), "anchored_chain")
+    assert transcript[0].payload.get("_monitor_input") is None
+    assert chain[0].payload["_monitor_input"] == "chain"
+    assert anchored[0].payload["_monitor_input"] == "anchored_chain"
+    assert set(MONITOR_INPUT_VIEWS) == {"agent_transcript", "chain", "anchored_chain"}
+
+
+def test_compare_monitor_views_returns_per_view_decisions():
+    from collusion_lab.monitor.core import compare_monitor_views
+    from collusion_lab.scenarios.market.monitor_plugin import MarketContext, MarketPlugin
+
+    log = EvidenceLog(None)
+    for i in range(3):
+        log.emit("ep", "a", EventKind.MESSAGE, {"text": f"m{i}"}, "chat:team", i)
+    ctx = MarketContext({"S1": 60, "S2": 62}, {"B1": 100}, ["S1", "S2"], step=0)
+    results = compare_monitor_views("M1", MarketPlugin(), ctx, log.events(), views=("agent_transcript", "chain"))
+    assert set(results) == {"agent_transcript", "chain"}
+    assert all(isinstance(d.action.value, str) for d in results.values())
