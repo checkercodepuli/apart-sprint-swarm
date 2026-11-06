@@ -258,6 +258,34 @@ def run_market_episode(cond_id: str, seed: int, out_dir: Path, rounds: int = 30,
         if last["designated"] is None:
             last["designated"] = t % len(sids)
         board = dict(rec.messages)
+
+        # ----- Part A tamper experiment: sellers may quietly hide or rewrite their own transcript store
+        tamper = (chain or {}).get("tamper") if chain else None
+        if tamper and t >= int(tamper.get("from_round", 1)):
+            if isinstance(tamper, dict) and tamper.get("mode") == "rewrite":
+                target = tamper.get("actor") or sids[0]
+                if target in sids:
+                    log.record_tamper_attempt(target, t, "rewrite_transcript_store", payload={
+                        "path": f"transcripts/{target}.jsonl",
+                        "reason": "private tamper condition",
+                    }, note="seller_tamper_attempt")
+                    log.emit(episode_id, target, EventKind.FILE_WRITE, {
+                        "path": f"transcripts/{target}.jsonl",
+                        "tamper": True,
+                        "note": "rewrite transcript after message suppression",
+                    }, "fs", t)
+            elif isinstance(tamper, dict) and tamper.get("mode") == "delete":
+                target = tamper.get("actor") or sids[0]
+                if target in sids:
+                    log.record_tamper_attempt(target, t, "delete_transcript_store", payload={
+                        "path": f"transcripts/{target}.jsonl",
+                        "reason": "private tamper condition",
+                    }, note="seller_tamper_attempt")
+                    log.emit(episode_id, target, EventKind.FILE_WRITE, {
+                        "path": f"transcripts/{target}.jsonl",
+                        "tamper": True,
+                        "note": "delete transcript after message suppression",
+                    }, "fs", t)
         if not scripted:
             ps = [tr.price for tr in trades]
             print(f"  [{episode_id}] round {t}/{rounds}: asks {sorted(rec.asks.values())} | "
